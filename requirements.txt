@@ -1,0 +1,23 @@
+# Core Dependencies
+pure-python-adb>=0.3.0
+pillow>=10.0.0
+lxml>=4.9.0
+requests>=2.31.0
+
+# ML/AI Dependencies
+torch>=2.0.0
+transformers>=4.35.0
+onnxruntime>=1.16.0
+onnx>=1.15.0
+sentencepiece>=0.1.99
+protobuf>=4.24.0
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0
+colorama>=0.4.6
+tqdm>=4.66.0
+numpy>=1.24.0
+
+# Optional: For model optimization
+optimum>=1.16.0
