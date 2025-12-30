@@ -1,161 +1,122 @@
-"""Main Agent orchestrating perception-reasoning-action cycle"""
+"""Main agent orchestrator implementing the perception-reasoning-action cycle."""
 
 import time
 import logging
 from typing import Dict, List, Optional
-from pathlib import Path
+from dataclasses import dataclass
 
-from .perception import ScreenPerception
-from .action_executor import ActionExecutor
-from .model_handler import ModelHandler
-from .utils import load_config, setup_logging
+from .perception import PerceptionModule
+from .action import ActionExecutor
+from .inference import GemmaInference
+from .utils import setup_logger
+
+
+@dataclass
+class AgentState:
+    """Represents the current state of the agent."""
+    task_description: str
+    current_screen: Optional[Dict] = None
+    action_history: List[Dict] = None
+    step_count: int = 0
+    max_steps: int = 50
+    task_completed: bool = False
+    
+    def __post_init__(self):
+        if self.action_history is None:
+            self.action_history = []
 
 
 class GUIAutomationAgent:
-    """Main agent for Android GUI automation using Gemma 3 models"""
+    """Main agent class for Android GUI automation."""
     
-    def __init__(self, config_path: str = "config.yaml"):
-        self.config = load_config(config_path)
-        self.logger = setup_logging(self.config)
+    def __init__(self, config: Dict):
+        """Initialize the agent with configuration.
         
-        # Initialize components
-        self.logger.info("Initializing GUI Automation Agent...")
-        self.perception = ScreenPerception(self.config)
-        self.executor = ActionExecutor(self.config)
-        self.model = ModelHandler(self.config)
+        Args:
+            config: Configuration dictionary containing model and device settings
+        """
+        self.logger = setup_logger(__name__, config.get('log_level', 'INFO'))
+        self.config = config
         
-        self.task_history: List[Dict] = []
-        self.current_step = 0
+        # Initialize core modules
+        self.perception = PerceptionModule(config)
+        self.action_executor = ActionExecutor(config)
+        self.inference = GemmaInference(config)
         
-    def run_task(self, task_description: str) -> bool:
-        """Execute a complete task through perception-reasoning-action cycle"""
-        self.logger.info(f"Starting task: {task_description}")
-        self.current_step = 0
-        max_steps = self.config['agent']['max_steps']
+        self.logger.info("Agent initialized successfully")
+    
+    def execute_task(self, task_description: str, max_steps: int = 50) -> bool:
+        """Execute a high-level task on the Android device.
         
-        system_prompt = self._build_system_prompt()
-        conversation_history = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Task: {task_description}"}
-        ]
-        
-        while self.current_step < max_steps:
-            self.current_step += 1
-            self.logger.info(f"Step {self.current_step}/{max_steps}")
+        Args:
+            task_description: Natural language description of the task
+            max_steps: Maximum number of steps to attempt
             
+        Returns:
+            True if task completed successfully, False otherwise
+        """
+        state = AgentState(
+            task_description=task_description,
+            max_steps=max_steps
+        )
+        
+        self.logger.info(f"Starting task: {task_description}")
+        
+        while not state.task_completed and state.step_count < state.max_steps:
             try:
-                # Perception: Capture screen state
-                screen_data = self.perception.capture_screen_state()
+                # Perception: Observe current screen state
+                screen_state = self.perception.capture_screen_state()
+                state.current_screen = screen_state
                 
-                if not screen_data:
-                    self.logger.error("Failed to capture screen state")
-                    return False
+                self.logger.info(f"Step {state.step_count + 1}: Analyzing screen")
                 
-                # Reasoning: Get next action from model
-                action_response = self.model.get_next_action(
-                    screen_data=screen_data,
-                    conversation_history=conversation_history
+                # Reasoning: Determine next action using Gemma model
+                action = self.inference.decide_next_action(
+                    screen_state=screen_state,
+                    task_description=task_description,
+                    action_history=state.action_history
                 )
                 
-                # Log reasoning
-                self.logger.info(f"Model reasoning: {action_response.get('reasoning', 'N/A')}")
+                self.logger.info(f"Planned action: {action['type']}")
                 
                 # Check if task is complete
-                if action_response.get('task_complete', False):
+                if action['type'] == 'task_complete':
+                    state.task_completed = True
                     self.logger.info("Task completed successfully!")
-                    return True
+                    break
                 
-                # Action: Execute the planned action
-                action = action_response.get('action')
-                if not action:
-                    self.logger.error("No action received from model")
-                    return False
-                
-                success = self._execute_action(action)
+                # Action: Execute the decided action
+                success = self.action_executor.execute(action)
                 
                 if not success:
-                    self.logger.warning(f"Action execution failed: {action}")
-                    conversation_history.append({
-                        "role": "assistant",
-                        "content": f"Action failed: {action}. Trying alternative approach."
-                    })
-                else:
-                    # Update conversation history
-                    conversation_history.append({
-                        "role": "assistant",
-                        "content": f"Executed: {action['type']} - {action_response.get('reasoning', '')}"
-                    })
+                    self.logger.warning(f"Action failed: {action}")
+                
+                # Update state
+                state.action_history.append({
+                    'step': state.step_count,
+                    'action': action,
+                    'success': success,
+                    'timestamp': time.time()
+                })
+                
+                state.step_count += 1
                 
                 # Wait for UI to update
-                time.sleep(self.config['agent']['action_delay'])
+                time.sleep(self.config.get('step_delay', 1.5))
                 
             except Exception as e:
-                self.logger.error(f"Error in step {self.current_step}: {str(e)}")
-                if self.config['agent']['screenshot_on_error']:
-                    self.perception.save_error_screenshot(f"error_step_{self.current_step}")
-                return False
+                self.logger.error(f"Error at step {state.step_count}: {str(e)}")
+                if not self.config.get('continue_on_error', False):
+                    break
         
-        self.logger.warning(f"Task not completed within {max_steps} steps")
-        return False
-    
-    def _execute_action(self, action: Dict) -> bool:
-        """Execute a single action"""
-        action_type = action.get('type')
+        if not state.task_completed:
+            self.logger.warning(f"Task not completed after {state.step_count} steps")
         
-        if action_type == 'tap':
-            return self.executor.tap(action['x'], action['y'])
-        elif action_type == 'swipe':
-            return self.executor.swipe(
-                action['start_x'], action['start_y'],
-                action['end_x'], action['end_y']
-            )
-        elif action_type == 'input_text':
-            return self.executor.input_text(action['text'])
-        elif action_type == 'press_key':
-            return self.executor.press_key(action['key'])
-        elif action_type == 'wait':
-            time.sleep(action.get('duration', 2))
-            return True
-        else:
-            self.logger.error(f"Unknown action type: {action_type}")
-            return False
+        return state.task_completed
     
-    def _build_system_prompt(self) -> str:
-        """Build system prompt for the model"""
-        return """You are an AI agent controlling an Android device through GUI automation.
-
-Your task is to analyze the current screen state and decide the next action to perform.
-You will receive:
-1. Screenshot description or UI hierarchy
-2. Available UI elements with their coordinates and properties
-
-You must respond in JSON format with:
-{
-  "reasoning": "Your thought process for this action",
-  "action": {
-    "type": "tap|swipe|input_text|press_key|wait",
-    "x": <int>,  // for tap
-    "y": <int>,  // for tap
-    "start_x": <int>,  // for swipe
-    "start_y": <int>,  // for swipe
-    "end_x": <int>,  // for swipe
-    "end_y": <int>,  // for swipe
-    "text": "<string>",  // for input_text
-    "key": "home|back|enter",  // for press_key
-    "duration": <float>  // for wait
-  },
-  "task_complete": false  // Set to true when task is finished
-}
-
-Be precise with coordinates. Analyze the UI hierarchy carefully before acting.
-"""
-
-
-if __name__ == "__main__":
-    agent = GUIAutomationAgent()
-    
-    # Example task
-    task = "Open the Settings app and enable Dark Mode"
-    success = agent.run_task(task)
-    
-    print(f"Task {'completed' if success else 'failed'}")
+    def cleanup(self):
+        """Cleanup resources."""
+        self.perception.cleanup()
+        self.action_executor.cleanup()
+        self.inference.cleanup()
+        self.logger.info("Agent cleanup completed")
